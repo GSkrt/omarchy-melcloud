@@ -28,7 +28,7 @@ Panel {
 
   // ---------------------------------------------------------------- settings
 
-  readonly property int refreshIntervalSec: Math.max(60, Number(setting("refreshIntervalSec", 60)))
+  readonly property int refreshIntervalSec: Math.max(180, Number(setting("refreshIntervalSec", 900)))
 
   // ------------------------------------------------------------------- paths
 
@@ -84,7 +84,7 @@ Panel {
     return root.foreground
   }
 
-  readonly property color activeModeColor: (root.device && root.device.power) ? root.modeColor(root.device.mode) : root.foreground
+  readonly property color activeModeColor: (root.device && root.device.power) ? root.modeColor(root.effectiveMode) : root.foreground
   readonly property color targetTempColor: root.activeModeColor
   readonly property color currentTempColor: Qt.rgba(root.activeModeColor.r, root.activeModeColor.g, root.activeModeColor.b, 0.6)
 
@@ -126,7 +126,7 @@ Panel {
   readonly property string barText: {
     if (root.notConfigured || root.hasError || !root.device) return "AC"
     var reading = root.device.room
-    if (reading === null || reading === undefined) reading = root.device.target
+    if (reading === null || reading === undefined) reading = root.effectiveTarget
     if (reading === null || reading === undefined) return "AC"
     return reading.toFixed(1) + "°"
   }
@@ -135,7 +135,7 @@ Panel {
     if (root.notConfigured) return "MELCloud · Not signed in"
     if (root.hasError) return "MELCloud · " + (root.errorMessage || root.errorCode)
     if (!root.device) return "MELCloud · Loading…"
-    var mode = root.modeLabels[root.device.mode] || root.device.mode
+    var mode = root.modeLabels[root.effectiveMode] || root.effectiveMode
     var state = root.device.power ? mode : "Off"
     var line = root.device.name + " · " + state
     if (root.device.room !== null && root.device.room !== undefined)
@@ -246,9 +246,7 @@ Panel {
     statusProcess.signal(9)
   }
 
-  function applySet(props) {
-    if (root.busy || !root.device) return
-    root.preemptStatusPoll()
+  function buildSetCommand(props) {
     var cmd = [root.venvPython, "-I", root.ctlScript, "set"]
     if (props.power !== undefined) { cmd.push("--power"); cmd.push(props.power ? "on" : "off") }
     if (props.mode !== undefined) { cmd.push("--mode"); cmd.push(props.mode) }
@@ -256,13 +254,149 @@ Panel {
     if (props.fan !== undefined) { cmd.push("--fan"); cmd.push(props.fan) }
     if (props.vaneH !== undefined) { cmd.push("--vane-h"); cmd.push(props.vaneH) }
     if (props.vaneV !== undefined) { cmd.push("--vane-v"); cmd.push(props.vaneV) }
+    return cmd
+  }
+
+  function dispatchAction(cmd) {
+    root.preemptStatusPoll()
     actionProcess.killed = false
     actionProcess.requestedAt = Date.now()
     actionProcess.command = cmd
     actionProcess.running = true
   }
 
-  function setPower(on) { root.applySet({ power: on }) }
+  // Debounced write path for everything except power (target temperature,
+  // mode, fan speed, either vane axis): merges rapid successive calls into
+  // one write after a short pause, instead of one API round-trip per click.
+  // Real-world evidence for why this matters, from melcloud.log: five rapid
+  // target-temperature clicks each individually succeeded (every "wrote"
+  // line confirmed exactly what was sent), and the very next independent
+  // status read afterward showed the temperature back at its value from
+  // *before* the whole burst -- not one step behind, the pre-burst value.
+  // The physical unit can't keep up with writes arriving that rapidly.
+  // pymelcloud actually has a built-in debounce for exactly this
+  // (device_set_debounce), but it only helps within one long-lived client
+  // session -- our one-shot-process-per-action architecture (see
+  // melcloud-ctl) means every call is a fresh process, so that debounce
+  // never gets a chance to do anything. This is that debounce, moved to
+  // where it can actually work.
+  //
+  // Power is deliberately excluded: it already has its own compressor-
+  // protection lock (see powerLocked) that only allows one command through
+  // at a time in the first place, so there is nothing here for a debounce
+  // to coalesce.
+  readonly property int pendingFlushDelayMs: 2000
+  property var pendingProps: ({})
+  readonly property bool hasPendingProps: Object.keys(root.pendingProps).length > 0
+  // Drives the top-of-panel progress line (see KeyboardPanel): animates
+  // 1 -> 0 over pendingFlushDelayMs, restarted on every call, so the line
+  // always shows time remaining until the *last* click, not the first.
+  property real pendingFillFraction: 0
+
+  // What the UI should actually display: a queued-but-unsent value if
+  // there is one, otherwise whatever the device last confirmed. Lets
+  // clicking +, say, keep incrementing the number shown immediately, even
+  // though nothing is sent to MELCloud until the debounce settles.
+  readonly property var effectiveTarget: root.pendingProps.target !== undefined
+    ? root.pendingProps.target : (root.device ? root.device.target : undefined)
+  readonly property string effectiveMode: root.pendingProps.mode !== undefined
+    ? root.pendingProps.mode : (root.device ? root.device.mode : "")
+  readonly property string effectiveFan: root.pendingProps.fan !== undefined
+    ? root.pendingProps.fan : (root.device ? root.device.fan : "")
+  readonly property string effectiveVaneH: root.pendingProps.vaneH !== undefined
+    ? root.pendingProps.vaneH : (root.device ? root.device.vaneH : "")
+  readonly property string effectiveVaneV: root.pendingProps.vaneV !== undefined
+    ? root.pendingProps.vaneV : (root.device ? root.device.vaneV : "")
+
+  NumberAnimation {
+    id: pendingDrainAnim
+    target: root
+    property: "pendingFillFraction"
+    to: 0
+    duration: root.pendingFlushDelayMs
+    easing.type: Easing.Linear
+  }
+
+  Timer {
+    id: pendingFlushTimer
+    interval: root.pendingFlushDelayMs
+    repeat: false
+    onTriggered: root.flushPendingProps()
+  }
+
+  function applySet(props) {
+    if (!root.device) return
+    root.pendingProps = Object.assign({}, root.pendingProps, props)
+    root.pendingFillFraction = 1
+    pendingDrainAnim.restart()
+    pendingFlushTimer.restart()
+  }
+
+  function flushPendingProps() {
+    if (!root.hasPendingProps) return
+    if (root.busy) {
+      // An action (or a preempted-poll cleanup) is still finishing up;
+      // try again shortly rather than dropping this write.
+      pendingFlushTimer.restart()
+      return
+    }
+    var props = root.pendingProps
+    root.pendingProps = {}
+    root.dispatchAction(root.buildSetCommand(props))
+  }
+
+  // Anti-short-cycle protection, symmetric in both directions -- pymelcloud
+  // has no knowledge of any of this at all (checked its source: it only has
+  // a 1s local write-debounce and a "don't poll more than once a minute"
+  // note, neither related to compressor hardware):
+  //
+  // - restartLockSeconds: Mitsubishi Electric's own indoor-unit firmware
+  //   locks the compressor out for up to ~3 minutes after a *stop*, before
+  //   it will *restart*. Documented specifically for Mitsubishi Electric
+  //   split systems (see the plugin's commit history for sources).
+  // - runLockSeconds: a minimum *run* time before a *stop* is honored.
+  //   Not something documented specifically for Mitsubishi the way the
+  //   restart figure is -- this is general anti-short-cycle practice
+  //   (Trane's own published spec is 3 min minimum run / 5 min minimum
+  //   off), applied here on the assumption that symmetric protection is
+  //   safer to assume than none.
+  //
+  // This is a plain fixed countdown, not a "check reality and unlock early"
+  // scheme like handleProcessResult's staleness guard elsewhere: there is
+  // no API field exposing how much longer the compressor's own internal
+  // protection timer has left, so there is nothing to poll that would tell
+  // us it's actually safe sooner. The countdown starts at click time, not
+  // on confirmation, since the physical lockout begins the moment the
+  // command reaches the unit, whether or not our own request round-trips
+  // cleanly.
+  readonly property int restartLockSeconds: 180
+  readonly property int runLockSeconds: 180
+  property double powerLockUntil: 0
+  property int powerLockRemaining: 0
+  readonly property bool powerLocked: root.powerLockUntil > 0
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.powerLockUntil > 0
+    onTriggered: {
+      var remainingMs = root.powerLockUntil - Date.now()
+      if (remainingMs <= 0) {
+        root.powerLockUntil = 0
+        root.powerLockRemaining = 0
+      } else {
+        root.powerLockRemaining = Math.ceil(remainingMs / 1000)
+      }
+    }
+  }
+
+  function setPower(on) {
+    if (root.busy || !root.device || root.powerLocked) return
+    root.dispatchAction(root.buildSetCommand({ power: on }))
+    var lockSeconds = on ? root.runLockSeconds : root.restartLockSeconds
+    root.powerLockUntil = Date.now() + lockSeconds * 1000
+    root.powerLockRemaining = lockSeconds
+  }
   function setMode(mode) { root.applySet({ mode: mode }) }
   function setFan(fan) { root.applySet({ fan: fan }) }
   function setVaneH(pos) { root.applySet({ vaneH: pos }) }
@@ -282,13 +416,13 @@ Panel {
   }
 
   function adjustTarget(sign) {
-    if (!root.device) return
+    if (!root.device || root.effectiveTarget === undefined) return
     var step = root.device.targetStep || 0.5
     var min = (root.device.targetMin !== null && root.device.targetMin !== undefined) ? root.device.targetMin : 16
     var max = (root.device.targetMax !== null && root.device.targetMax !== undefined) ? root.device.targetMax : 31
-    var next = Math.round((root.device.target + sign * step) * 10) / 10
+    var next = Math.round((root.effectiveTarget + sign * step) * 10) / 10
     next = Math.max(min, Math.min(max, next))
-    if (next === root.device.target) return
+    if (next === root.effectiveTarget) return
     root.applySet({ target: next })
   }
 
@@ -457,7 +591,7 @@ Panel {
             if (root.notConfigured) return "Not signed in"
             if (root.hasError) return root.errorMessage || root.errorCode
             if (!root.device) return "Loading…"
-            var mode = root.modeLabels[root.device.mode] || root.device.mode
+            var mode = root.modeLabels[root.effectiveMode] || root.effectiveMode
             return root.device.power ? mode : "Off"
           }
           foreground: root.foreground
@@ -545,11 +679,30 @@ Panel {
               id: powerPill
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              label: root.device && root.device.power ? "On" : "Off"
+              // Labeled by what clicking it *does*, not the current state --
+              // "Off" read as a static label was ambiguous about which way
+              // a click would go. The highlight color still shows current
+              // state at a glance; the text now always names the action.
+              label: root.powerLocked
+                ? ("Wait " + root.powerLockRemaining + "s")
+                : (root.device && root.device.power ? "Turn Off" : "Turn On")
               selected: !!(root.device && root.device.power)
-              enabled: !root.busy
+              enabled: !root.busy && !root.powerLocked
               onClicked: root.setPower(!(root.device && root.device.power))
             }
+          }
+
+          Text {
+            visible: root.powerLocked
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: (root.device && root.device.power)
+              ? "Minimum run time before it can be stopped again, to protect the compressor from short-cycling."
+              : "Compressor restart lockout after a stop — standard on Mitsubishi hardware, protects the compressor."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
 
           Row {
@@ -597,8 +750,8 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: (root.device && root.device.target !== null && root.device.target !== undefined)
-                    ? root.device.target.toFixed(1) + "°C" : "—"
+                  text: (root.device && root.effectiveTarget !== null && root.effectiveTarget !== undefined)
+                    ? root.effectiveTarget.toFixed(1) + "°C" : "—"
                   color: root.targetTempColor
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.heading
@@ -638,7 +791,7 @@ Panel {
               Pill {
                 required property string modelData
                 label: root.modeLabels[modelData] || modelData
-                selected: root.device && root.device.mode === modelData
+                selected: root.device && root.effectiveMode === modelData
                 enabled: !root.busy
                 onClicked: root.setMode(modelData)
               }
@@ -650,8 +803,12 @@ Panel {
             positions: root.device ? root.device.fans : []
             linearOrder: ["1", "2", "3", "4", "5"]
             specialOrder: ["auto"]
-            currentValue: root.device ? root.device.fan : ""
+            currentValue: root.device ? root.effectiveFan : ""
             labelFor: function(v) { return v === "auto" ? "Auto" : v }
+            sliderTooltip: "Fan speed — drag to set how fast the fan blows, low to high"
+            decreaseTooltip: "Lower fan speed"
+            increaseTooltip: "Raise fan speed"
+            tooltipFor: function(v) { return v === "auto" ? "Let the unit choose fan speed automatically" : "" }
             onPicked: function(value) { root.setFan(value) }
           }
 
@@ -660,8 +817,17 @@ Panel {
             positions: root.device ? root.device.vaneHPositions : []
             linearOrder: ["1_left", "2", "3", "4", "5_right"]
             specialOrder: ["auto", "split", "swing"]
-            currentValue: root.device ? root.device.vaneH : ""
+            currentValue: root.device ? root.effectiveVaneH : ""
             labelFor: function(v) { return root.vaneHLabels[v] || v }
+            sliderTooltip: "Horizontal vane angle — drag to aim the airflow left to right"
+            decreaseTooltip: "Aim blades further left"
+            increaseTooltip: "Aim blades further right"
+            tooltipFor: function(v) {
+              if (v === "auto") return "Let the unit choose the horizontal angle automatically"
+              if (v === "split") return "Split airflow both left and right at once"
+              if (v === "swing") return "Continuously sweep the blades left and right"
+              return ""
+            }
             onPicked: function(value) { root.setVaneH(value) }
           }
 
@@ -670,8 +836,16 @@ Panel {
             positions: root.device ? root.device.vaneVPositions : []
             linearOrder: ["1_up", "2", "3", "4", "5_down"]
             specialOrder: ["auto", "swing"]
-            currentValue: root.device ? root.device.vaneV : ""
+            currentValue: root.device ? root.effectiveVaneV : ""
             labelFor: function(v) { return root.vaneVLabels[v] || v }
+            sliderTooltip: "Vertical vane angle — drag to aim the airflow up to down"
+            decreaseTooltip: "Aim blades further up"
+            increaseTooltip: "Aim blades further down"
+            tooltipFor: function(v) {
+              if (v === "auto") return "Let the unit choose the vertical angle automatically"
+              if (v === "swing") return "Continuously sweep the blades up and down"
+              return ""
+            }
             onPicked: function(value) { root.setVaneV(value) }
           }
         }
@@ -689,6 +863,34 @@ Panel {
           topPadding: Style.spacing.lg
           bottomPadding: Style.spacing.lg
         }
+      }
+    }
+
+    // Thin progress line across the very top of the panel: drains while a
+    // debounced change (temperature/mode/fan/vane -- see applySet) is
+    // waiting to be sent, then turns solid while it's actually in flight.
+    // Declared last so it paints over everything else.
+    Item {
+      anchors.top: parent.top
+      anchors.left: parent.left
+      anchors.right: parent.right
+      height: Style.space(2)
+      opacity: (root.hasPendingProps || root.busy) ? 1 : 0
+      visible: opacity > 0
+
+      Behavior on opacity { NumberAnimation { duration: 150 } }
+
+      Rectangle {
+        anchors.fill: parent
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+      }
+
+      Rectangle {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        color: root.busy ? root.foreground : Color.accent
+        width: root.busy ? parent.width : parent.width * root.pendingFillFraction
       }
     }
   }
@@ -830,6 +1032,13 @@ Panel {
     property var specialOrder: []
     property string currentValue: ""
     property var labelFor: function(v) { return v }
+    // Hover text. sliderTooltip describes what dragging the slider does;
+    // decrease/increaseTooltip describe the step buttons; tooltipFor(v)
+    // describes one of the special (non-linear) pills, e.g. "auto"/"swing".
+    property string sliderTooltip: ""
+    property string decreaseTooltip: ""
+    property string increaseTooltip: ""
+    property var tooltipFor: function(v) { return "" }
     signal picked(string value)
 
     readonly property var linear: lc.linearOrder.filter(function(p) { return lc.positions.indexOf(p) !== -1 })
@@ -878,6 +1087,7 @@ Panel {
         Pill {
           required property string modelData
           label: lc.labelFor(modelData)
+          tooltipText: lc.tooltipFor(modelData)
           selected: lc.currentValue === modelData
           enabled: !root.busy
           onClicked: lc.picked(modelData)
@@ -894,6 +1104,7 @@ Panel {
         id: minusBtn
         anchors.verticalCenter: parent.verticalCenter
         iconText: "−"
+        tooltipText: lc.decreaseTooltip
         foreground: root.foreground
         fontFamily: root.fontFamily
         enabled: !root.busy
@@ -916,6 +1127,18 @@ Panel {
         fillColor: root.foreground
         knobColor: root.foreground
         onReleased: function(v) { lc.picked(lc.linear[Math.round(v) - 1]) }
+
+        // Passive hover detection layered over the slider's own MouseArea
+        // (which handles the actual drag/click): HoverHandler never accepts
+        // or consumes pointer events, so it can watch for hover here without
+        // taking anything away from dragging.
+        HoverHandler { id: sliderHover }
+
+        PanelToolTip {
+          visible: lc.sliderTooltip !== "" && sliderHover.hovered
+          text: lc.sliderTooltip
+          fontFamily: root.fontFamily
+        }
       }
 
       DialGlyph {
@@ -931,6 +1154,7 @@ Panel {
         id: plusBtn
         anchors.verticalCenter: parent.verticalCenter
         iconText: "+"
+        tooltipText: lc.increaseTooltip
         foreground: root.foreground
         fontFamily: root.fontFamily
         enabled: !root.busy
@@ -947,6 +1171,7 @@ Panel {
     id: pill
 
     property string label: ""
+    property string tooltipText: ""
     property bool selected: false
     property bool enabled: true
     signal clicked()
@@ -981,6 +1206,12 @@ Panel {
       enabled: pill.enabled
       cursorShape: Qt.PointingHandCursor
       onClicked: pill.clicked()
+    }
+
+    PanelToolTip {
+      visible: pill.tooltipText !== "" && mouseArea.containsMouse
+      text: pill.tooltipText
+      fontFamily: root.fontFamily
     }
   }
 }

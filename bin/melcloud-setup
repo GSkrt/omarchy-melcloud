@@ -54,7 +54,7 @@ async def _run():
         common.set_password(email, password)
 
         try:
-            devices = await common.fetch_devices(session, token)
+            devices = await common.fetch_devices(session, token, use_cache=False)
         except aiohttp.ClientError as exc:
             print("Signed in, but could not list devices: %s" % exc)
             return 1

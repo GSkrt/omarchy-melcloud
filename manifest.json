@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gskrt.melcloud",
   "name": "OmaMELCloud",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "author": "Gregor Skrt",
   "license": "MIT",
   "description": "Control a Mitsubishi Electric MELCloud air conditioner from the Omarchy bar: power, mode, and target temperature for one room.",
@@ -20,18 +20,18 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalSec": 60
+      "refreshIntervalSec": 900
     },
     "schema": [
       {
         "key": "refreshIntervalSec",
         "type": "integer",
         "label": "Refresh interval (seconds)",
-        "description": "How often to poll MELCloud for the device's state. MELCloud asks integrations not to poll device state more than about once a minute, so this is floored at 60.",
-        "min": 60,
-        "max": 600,
-        "step": 10,
-        "defaultValue": 60
+        "description": "How often to poll MELCloud in the background for the device's state, separate from opening the panel (which always refreshes). Defaults to 900s (15 minutes), matching Home Assistant's own MELCloud integration -- MELCloud has rate-limited and temporarily locked accounts that polled more aggressively than this. Floored at 180s.",
+        "min": 180,
+        "max": 1800,
+        "step": 60,
+        "defaultValue": 900
       }
     ]
   }

@@ -23,6 +23,7 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".config" / "omarchy-melcloud"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
+DEVICES_CACHE_FILE = CONFIG_DIR / "devices_cache.json"
 LOG_FILE = CONFIG_DIR / "melcloud.log"
 LOG_MAX_LINES = 400
 
@@ -34,6 +35,13 @@ SECRET_SERVICE = "omarchy-melcloud"
 # API call that actually fails with 401/403 clears the cache immediately,
 # regardless of this TTL.
 TOKEN_TTL_SECONDS = 12 * 3600
+
+# How long the device list (ListDevices + GetUserDetails -- static identity
+# and capabilities, not live state) is trusted before being refetched.
+# Matches Home Assistant's own MELCloud integration exactly, chosen there
+# ("matches upstream Throttle value") after MELCloud rate-limited accounts
+# hard enough to lock people out over exactly this kind of call.
+DEVICES_CACHE_TTL_SECONDS = 30 * 60
 
 
 class MelCloudError(Exception):
@@ -85,6 +93,26 @@ def clear_token():
         pass
 
 
+def load_cached_device_confs():
+    try:
+        data = json.loads(DEVICES_CACHE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    cached_at = data.get("cachedAt")
+    confs = data.get("confs")
+    if not isinstance(cached_at, (int, float)) or not isinstance(confs, list):
+        return None
+    if time.time() - cached_at > DEVICES_CACHE_TTL_SECONDS:
+        return None
+    return confs
+
+
+def save_device_confs_cache(confs):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    DEVICES_CACHE_FILE.write_text(json.dumps({"cachedAt": time.time(), "confs": confs}))
+    DEVICES_CACHE_FILE.chmod(0o600)
+
+
 def get_password(email):
     """Look up the MELCloud password for `email` in the login keyring."""
     try:
@@ -122,15 +150,40 @@ async def obtain_token(session, email, password):
     return token
 
 
-async def fetch_devices(session, token):
+async def fetch_devices(session, token, use_cache=True):
     """Return the ATA (air-to-air, i.e. split system) devices on this account.
 
-    conf_update_interval/device_set_debounce are zeroed out: pymelcloud's
-    defaults exist to let a long-lived client amortize calls and debounce
-    writes across repeated use, but every invocation here is a fresh,
-    one-shot process, so there is nothing to amortize and no reason to make
-    a `set` wait out an artificial debounce.
+    device_set_debounce is zeroed out: pymelcloud's default exists to let a
+    long-lived client coalesce rapid writes, but every invocation here is a
+    fresh, one-shot process, so there is nothing to coalesce and no reason
+    to make a `set` wait out an artificial debounce (the panel does its own
+    debouncing before ever calling this -- see Panel.qml's applySet).
+
+    Device *state* (power, temperature, mode, ...) always comes from a live
+    Device/Get via device.update(), called separately by every caller of
+    this function -- that is unaffected by use_cache. What use_cache
+    controls is the *device list and its static capabilities* (which units
+    exist, their supported modes/fan speeds/temperature range), fetched via
+    MELCloud's ListDevices + GetUserDetails. Home Assistant's own MELCloud
+    integration caches exactly this for 30 minutes ("matches upstream
+    Throttle value", per its source) after MELCloud rate-limited accounts
+    hard enough to lock people out (HTTP 429, "excessive traffic"). Without
+    this cache, every single invocation of this CLI -- every status poll
+    *and* every set/select action -- re-ran both of those calls from
+    scratch, which is the single biggest source of avoidable MELCloud
+    traffic in this plugin.
     """
+    cached_confs = load_cached_device_confs() if use_cache else None
+    if cached_confs is not None:
+        from pymelcloud.ata_device import AtaDevice
+        from pymelcloud.client import Client as _Client
+        client = _Client(token, session)
+        return [
+            AtaDevice(conf, client)
+            for conf in cached_confs
+            if conf.get("Device", {}).get("DeviceType") == 0
+        ]
+
     from datetime import timedelta
     import pymelcloud
     groups = await pymelcloud.get_devices(
@@ -138,7 +191,9 @@ async def fetch_devices(session, token):
         conf_update_interval=timedelta(seconds=0),
         device_set_debounce=timedelta(seconds=0),
     )
-    return groups.get("ata", [])
+    devices = groups.get("ata", [])
+    save_device_confs_cache([d._device_conf for d in devices])  # noqa: SLF001
+    return devices
 
 
 async def get_ata_devices(session, email, use_cache=True):
