@@ -34,9 +34,13 @@ start with if your account has more than one -- the rest stay reachable from
 the panel afterward (see below), so this pick is just a starting point.
 
 The password is saved to your login keyring via `secret-tool`
-(libsecret/gnome-keyring) — never written to a plain file. The account email
-and the device list are saved, non-secret, in
-`~/.config/omarchy-melcloud/config.json`. You can re-run setup at any time
+(libsecret/gnome-keyring) — never written to a plain file. The account
+email and a lightweight id/name list of your devices (for the panel's
+device picker) are saved, non-secret, in
+`~/.config/omarchy-melcloud/config.json` — a separate file,
+`devices_cache.json`, caches the full API response for up to 30 minutes to
+avoid re-fetching it on every call (see "Protecting the compressor and the
+account" below). You can re-run setup at any time
 from the panel's **Reconfigure** button to switch accounts.
 
 ## Using it
@@ -75,8 +79,8 @@ Turning on locks *turning back off* for up to 3 minutes too — not documented
 specifically for Mitsubishi, but standard anti-short-cycle practice
 generally ([Trane's own published spec](https://www.trane.com/residential/en/resources/glossary/hvac-short-cycling/):
 3 min minimum run, 5 min minimum off). The button shows a live countdown
-and a short explanation
-while locked; stopping/starting itself is never restricted, only re-doing
+and a short explanation while locked; stopping/starting itself is never
+restricted, only re-doing
 the *opposite* action too soon after. `pymelcloud` has no knowledge of any
 of this — checked its source directly, it only has a 1s local write-debounce
 and a "don't poll more than once a minute" note, neither about compressor
@@ -95,9 +99,8 @@ one-shot process (see "How it works" below), so that debounce never gets a
 chance to run. Panel.qml now does its own: rapid clicks update the display
 immediately but only send one write, 2 seconds after the last click
 (matching Home Assistant's own `device_set_debounce` for the same purpose),
-with
-a thin progress line across the top of the panel showing the countdown and
-then turning solid while the write is actually in flight. Power is exempt —
+with a thin progress line across the top of the panel showing the countdown
+and then turning solid while the write is actually in flight. Power is exempt —
 it already has its own lock above, which only allows one command through at
 a time regardless.
 
@@ -115,7 +118,7 @@ out](https://github.com/home-assistant/core/issues/109728). This plugin now
 matches both: the device list is cached to
 `~/.config/omarchy-melcloud/devices_cache.json` for 30 minutes, and the
 background poll interval (configurable, still respected in the panel's
-settings) defaults to 15 minutes, floored at 3. Opening the panel still
+settings) defaults to 15 minutes, floored at 3 minutes. Opening the panel still
 always fetches live state for the one thing you actually came to look at —
 only the passive background polling backed off.
 
@@ -131,8 +134,9 @@ run inside the private venv:
   from MELCloud alongside everything else `status`/`set` already fetch), not
   just the selected one; that's what the panel's device picker is built from.
   `select` just changes which device id is "current" in config.json. The
-  device list itself is cached (see "Protecting the compressor and the
-  account" above) to `~/.config/omarchy-melcloud/devices_cache.json`;
+  underlying API response this is built from is itself cached (see
+  "Protecting the compressor and the account" above) in
+  `~/.config/omarchy-melcloud/devices_cache.json` for up to 30 minutes;
   `melcloud-setup` always bypasses that cache, so re-running setup always
   sees your account's current devices.
 - `melcloud-setup` — the interactive sign-in/reconfigure flow, run in a
