@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "Gregor Skrt",
   "license": "MIT",
-  "description": "Control a Mitsubishi Electric MELCloud air conditioner from the Omarchy bar: power, mode, and target temperature for one room.",
+  "description": "Control your Mitsubishi Electric MELCloud air conditioners from the Omarchy bar: power, mode, target temperature, fan speed, and vane direction, with compressor-protection safeguards and support for switching between multiple units.",
   "homepage": "https://github.com/GSkrt/omarchy-melcloud",
   "kinds": [
     "bar-widget"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "OmaMELCloud",
-    "description": "Shows room and target temperature and power state for one MELCloud air conditioner, with power, mode, and target-temperature controls in the panel.",
+    "description": "Shows room and target temperature and power state for your MELCloud air conditioner(s), with power, mode, target temperature, fan speed, and vane controls, plus a device picker if your account has more than one unit.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
