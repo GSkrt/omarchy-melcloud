@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gskrt.melcloud",
   "name": "OmaMELCloud",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Gregor Skrt",
   "license": "MIT",
   "description": "Control your Mitsubishi Electric MELCloud air conditioners from the Omarchy bar: power, mode, target temperature, fan speed, and vane direction, with compressor-protection safeguards and support for switching between multiple units.",

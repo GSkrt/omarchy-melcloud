@@ -23,8 +23,11 @@ VENV_DIR="$DATA_DIR/venv"
 
 echo "Creating a Python virtual environment for pymelcloud at $VENV_DIR..."
 /usr/bin/python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --upgrade pip >/dev/null
-"$VENV_DIR/bin/pip" install pymelcloud
+# --require-hashes: refuses to install anything -- pip itself included --
+# that isn't listed in requirements.txt with a matching sha256, rather than
+# pulling whatever the package index currently serves. See that file's own
+# header for how it's generated and verified.
+"$VENV_DIR/bin/pip" install --require-hashes -r "$PLUGIN_DIR/requirements.txt"
 
 echo "Adding OmaMELCloud to the bar..."
 /usr/share/omarchy/bin/omarchy-plugin-enable io.github.gskrt.melcloud

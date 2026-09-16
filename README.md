@@ -25,6 +25,14 @@ git clone https://github.com/GSkrt/omarchy-melcloud.git ~/.config/omarchy/plugin
 aiohttp are not part of Omarchy's system Python) and adds the widget to the
 bar. It needs no `sudo`.
 
+Every package installed into that venv — pip itself, pymelcloud, and every
+one of pymelcloud's transitive dependencies — is pinned to an exact version
+and verified against a sha256 hash from
+[`requirements.txt`](requirements.txt), via `pip install --require-hashes`.
+Nothing is pulled from whatever the package index happens to be currently
+serving. See that file's own header for how to regenerate it after bumping
+a version.
+
 ## Set up your MELCloud account
 
 Click the new "AC" bar icon and choose **Sign in**. That opens a floating
