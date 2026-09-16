@@ -148,6 +148,7 @@ Panel {
   function refresh() {
     if (statusProcess.running) return
     statusProcess.killed = false
+    statusProcess.requestedAt = Date.now()
     statusProcess.command = [root.venvPython, "-I", root.ctlScript, "status"]
     statusProcess.running = true
   }
@@ -169,6 +170,30 @@ Panel {
 
   onOpenedChanged: {
     if (opened && Date.now() - root.lastUpdatedAt > 15000) root.refresh()
+  }
+
+  // Guards against a stale response clobbering a fresher one: statusProcess
+  // (the 60s/on-open background poll) and actionProcess (a user click) run
+  // as two independent Processes with no ordering between them, so a slow
+  // status call issued before a quick set-target click can still finish
+  // *after* it, carrying the pre-click temperature. Every completion -
+  // success, script error, or timeout - funnels through here, stamped with
+  // when its request was sent, and anything older than the last-applied
+  // request is silently dropped rather than allowed to overwrite the UI.
+  property double lastAppliedRequestAt: 0
+
+  function handleProcessResult(requestedAt, killed, exitCode, stdoutText, stderrText) {
+    if (requestedAt < root.lastAppliedRequestAt) return
+    root.lastAppliedRequestAt = requestedAt
+    if (killed) {
+      root.setError("timeout", "MELCloud took too long to answer")
+      return
+    }
+    if (exitCode !== 0) {
+      root.setError("script_error", String(stderrText || "melcloud-ctl exited with code " + exitCode))
+      return
+    }
+    root.applyResult(stdoutText)
   }
 
   function applyResult(rawText) {
@@ -208,6 +233,7 @@ Panel {
     if (props.vaneH !== undefined) { cmd.push("--vane-h"); cmd.push(props.vaneH) }
     if (props.vaneV !== undefined) { cmd.push("--vane-v"); cmd.push(props.vaneV) }
     actionProcess.killed = false
+    actionProcess.requestedAt = Date.now()
     actionProcess.command = cmd
     actionProcess.running = true
   }
@@ -225,6 +251,7 @@ Panel {
   function selectDevice(id) {
     if (root.busy || (root.device && root.device.id === id)) return
     actionProcess.killed = false
+    actionProcess.requestedAt = Date.now()
     actionProcess.command = [root.venvPython, "-I", root.ctlScript, "select", "--device-id", String(id)]
     actionProcess.running = true
   }
@@ -262,18 +289,11 @@ Panel {
     clearEnvironment: true
     environment: root.minimalEnvironment
     property bool killed: false
+    property double requestedAt: 0
     stdout: StdioCollector { id: statusOut; waitForEnd: true }
     stderr: StdioCollector { id: statusErr; waitForEnd: true }
     onExited: function(code) {
-      if (statusProcess.killed) {
-        root.setError("timeout", "MELCloud took too long to answer")
-        return
-      }
-      if (code !== 0) {
-        root.setError("script_error", String(statusErr.text || "melcloud-ctl exited with code " + code))
-        return
-      }
-      root.applyResult(statusOut.text)
+      root.handleProcessResult(statusProcess.requestedAt, statusProcess.killed, code, statusOut.text, statusErr.text)
     }
   }
 
@@ -293,18 +313,11 @@ Panel {
     clearEnvironment: true
     environment: root.minimalEnvironment
     property bool killed: false
+    property double requestedAt: 0
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(code) {
-      if (actionProcess.killed) {
-        root.setError("timeout", "MELCloud took too long to answer")
-        return
-      }
-      if (code !== 0) {
-        root.setError("script_error", String(actionErr.text || "melcloud-ctl exited with code " + code))
-        return
-      }
-      root.applyResult(actionOut.text)
+      root.handleProcessResult(actionProcess.requestedAt, actionProcess.killed, code, actionOut.text, actionErr.text)
     }
   }
 
