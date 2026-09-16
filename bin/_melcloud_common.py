@@ -14,13 +14,17 @@ login token) is non-secret-ish bookkeeping and lives in a plain JSON file
 under ~/.config/omarchy-melcloud/, chmod 600 as a matter of course.
 """
 import json
+import os
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "omarchy-melcloud"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
+LOG_FILE = CONFIG_DIR / "melcloud.log"
+LOG_MAX_LINES = 400
 
 SECRET_TOOL = "/usr/bin/secret-tool"
 SECRET_SERVICE = "omarchy-melcloud"
@@ -193,7 +197,31 @@ def device_to_json(device):
     }
 
 
+def log(message):
+    """Append one line to the debug log, trimmed to the last LOG_MAX_LINES.
+
+    Keyed by pid and wall-clock time so two overlapping invocations (a
+    background status poll racing a user's click, say) show up as
+    interleaved lines that are easy to tell apart -- that overlap is
+    exactly the kind of bug this log exists to make visible. Never raises:
+    a logging failure should not take down the actual MELCloud call.
+    """
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        line = "%s pid=%d %s\n" % (datetime.now().isoformat(timespec="milliseconds"), os.getpid(), message)
+        lines = []
+        if LOG_FILE.exists():
+            lines = LOG_FILE.read_text().splitlines(keepends=True)
+        lines.append(line)
+        if len(lines) > LOG_MAX_LINES:
+            lines = lines[-LOG_MAX_LINES:]
+        LOG_FILE.write_text("".join(lines))
+    except OSError:
+        pass
+
+
 def emit(payload):
+    log("emit " + json.dumps(payload)[:400])
     print(json.dumps(payload))
 
 

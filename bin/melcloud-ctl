@@ -42,6 +42,7 @@ import _melcloud_common as common  # noqa: E402
 
 
 async def _run(args):
+    common.log("start %s" % vars(args))
     config = common.load_config()
     email = config.get("email")
     device_id = config.get("deviceId")
@@ -84,6 +85,10 @@ async def _run(args):
 
         try:
             await device.update()
+            common.log(
+                "fetched power=%s mode=%s target=%s room=%s"
+                % (device.power, device.operation_mode, device.target_temperature, device.room_temperature)
+            )
 
             if args.command == "set":
                 properties = {}
@@ -100,7 +105,12 @@ async def _run(args):
                 if args.vane_v is not None:
                     properties["vane_vertical"] = args.vane_v
                 if properties:
+                    common.log("writing %s" % properties)
                     await device.set(properties)
+                    common.log(
+                        "wrote power=%s mode=%s target=%s room=%s"
+                        % (device.power, device.operation_mode, device.target_temperature, device.room_temperature)
+                    )
         except aiohttp.ClientError as exc:
             common.emit_error("network_error", str(exc))
             return

@@ -146,8 +146,18 @@ Panel {
   // ----------------------------------------------------------------- polling
 
   function refresh() {
-    if (statusProcess.running) return
+    // Also skip while an action is in flight, not just another status poll:
+    // statusProcess and actionProcess are separate OS processes that each do
+    // their own independent MELCloud round-trip, so if both ran at once
+    // there would be no guarantee the status read reflects the action's
+    // write yet -- MELCloud itself gives no such ordering guarantee between
+    // two concurrent requests, only "each request is internally consistent".
+    // The fix is not reordering responses after the fact (see
+    // handleProcessResult) but never letting the two race to begin with.
+    // Skipping here is enough on its own; see applySet for the other half.
+    if (statusProcess.running || actionProcess.running) return
     statusProcess.killed = false
+    statusProcess.superseded = false
     statusProcess.requestedAt = Date.now()
     statusProcess.command = [root.venvPython, "-I", root.ctlScript, "status"]
     statusProcess.running = true
@@ -223,8 +233,22 @@ Panel {
 
   // ----------------------------------------------------------------- actions
 
+  // The other half of never letting statusProcess and actionProcess race
+  // (see refresh()): a status poll can already be in flight the moment the
+  // user clicks something, since it wasn't rejected at dispatch time. Killed
+  // outright rather than just awaited -- the user's action should not sit
+  // behind an up-to-60s-old background poll that's about to be superseded
+  // anyway. statusProcess's onExited checks `superseded` before calling
+  // handleProcessResult at all, so this never flashes a stray error.
+  function preemptStatusPoll() {
+    if (!statusProcess.running) return
+    statusProcess.superseded = true
+    statusProcess.signal(9)
+  }
+
   function applySet(props) {
     if (root.busy || !root.device) return
+    root.preemptStatusPoll()
     var cmd = [root.venvPython, "-I", root.ctlScript, "set"]
     if (props.power !== undefined) { cmd.push("--power"); cmd.push(props.power ? "on" : "off") }
     if (props.mode !== undefined) { cmd.push("--mode"); cmd.push(props.mode) }
@@ -250,6 +274,7 @@ Panel {
   // list, precisely so this stays usable as the way out of that state).
   function selectDevice(id) {
     if (root.busy || (root.device && root.device.id === id)) return
+    root.preemptStatusPoll()
     actionProcess.killed = false
     actionProcess.requestedAt = Date.now()
     actionProcess.command = [root.venvPython, "-I", root.ctlScript, "select", "--device-id", String(id)]
@@ -289,10 +314,16 @@ Panel {
     clearEnvironment: true
     environment: root.minimalEnvironment
     property bool killed: false
+    // Set only by preemptStatusPoll(), never by the timeout backstop below --
+    // distinguishes "the user's action superseded this poll, drop it
+    // quietly" from "this genuinely hung," which should still surface as an
+    // error. Reset at dispatch time in refresh(), same as killed.
+    property bool superseded: false
     property double requestedAt: 0
     stdout: StdioCollector { id: statusOut; waitForEnd: true }
     stderr: StdioCollector { id: statusErr; waitForEnd: true }
     onExited: function(code) {
+      if (statusProcess.superseded) return
       root.handleProcessResult(statusProcess.requestedAt, statusProcess.killed, code, statusOut.text, statusErr.text)
     }
   }

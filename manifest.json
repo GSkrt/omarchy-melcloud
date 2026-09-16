@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gskrt.melcloud",
   "name": "OmaMELCloud",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Gregor Skrt",
   "license": "MIT",
   "description": "Control a Mitsubishi Electric MELCloud air conditioner from the Omarchy bar: power, mode, and target temperature for one room.",

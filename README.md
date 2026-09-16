@@ -77,6 +77,21 @@ run inside the private venv:
 Panel.qml only ever shells out to these two scripts and parses their JSON —
 it never calls MELCloud directly.
 
+Every `melcloud-ctl` invocation appends a couple of lines to
+`~/.config/omarchy-melcloud/melcloud.log` (auto-trimmed to the last 400
+lines): when it started, what it read from MELCloud, what it wrote (if
+anything), and what it returned, each tagged with its process id. Two
+overlapping invocations -- a background poll racing a click, say -- show up
+as interleaved lines with different pids, which is what makes that kind of
+bug possible to actually diagnose instead of guessed at.
+
+The panel itself also refuses to run a background status poll and a
+user-triggered action at the same time (see the `preemptStatusPoll`/`refresh`
+comments in Panel.qml): they're two independent processes each doing their
+own MELCloud round-trip, and MELCloud gives no ordering guarantee between
+two concurrent requests, so letting both run at once could show a value
+reverting right after you set it.
+
 ## Uninstall
 
 ```
