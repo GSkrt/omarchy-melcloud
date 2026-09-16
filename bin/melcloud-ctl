@@ -1,0 +1,134 @@
+#!/usr/bin/python3 -I
+"""JSON CLI for the Omarchy Climate bar panel.
+
+Talks to MELCloud through pymelcloud (installed into this plugin's own venv
+by install.sh — see there for why). Always prints exactly one JSON object to
+stdout and exits 0, even on failure: every failure mode becomes
+{"ok": false, "error": "<code>", "message": "..."} so the QML side always has
+something well-formed to parse instead of having to distinguish "no output"
+from "bad output" from "a real error".
+
+Usage:
+  melcloud-ctl status
+  melcloud-ctl set [--power on|off] [--mode heat|dry|cool|fan_only|heat_cool]
+                    [--target 21.5] [--fan auto|1|2|3|4|5]
+                    [--vane-h auto|1_left|2|3|4|5_right|split|swing]
+                    [--vane-v auto|1_up|2|3|4|5_down|swing]
+  melcloud-ctl select --device-id 12345
+
+--fan takes whatever string the device itself reports as a valid speed in
+`status`'s "fans" list (the count of numbered speeds varies by model) --
+there is no fixed choice list for it the way there is for mode/vane.
+
+`status` and `set` always report every ATA device on the account under
+"devices" (id + name only -- that list comes for free with every MELCloud
+device-list call, no extra request), alongside the full state of whichever
+one is currently selected. `select` just changes which device id is "current"
+in config.json and then behaves like `status` -- it exists so the panel can
+switch which unit it's controlling without re-running melcloud-setup.
+"""
+import argparse
+import asyncio
+import os
+import sys
+
+# Explicit sys.path insert rather than a bare `import _melcloud_common`: this
+# script runs as `python3 -I <path>`, and -I implies -P, which skips Python's
+# usual "prepend the running script's own directory to sys.path" step. Doing
+# it here, in code, is unaffected by -I -- -P only suppresses Python's own
+# *automatic* prepend before user code starts running.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _melcloud_common as common  # noqa: E402
+
+
+async def _run(args):
+    config = common.load_config()
+    email = config.get("email")
+    device_id = config.get("deviceId")
+
+    if args.command == "select":
+        if not email:
+            common.emit_error("not_configured", "Run melcloud-setup first")
+            return
+        device_id = args.device_id
+        config["deviceId"] = device_id
+        common.save_config(config)
+
+    if not email or device_id is None:
+        common.emit_error("not_configured", "Run melcloud-setup first")
+        return
+
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            _token, devices = await common.get_ata_devices(session, email)
+        except common.MelCloudError as exc:
+            common.emit_error(exc.code, exc.message)
+            return
+
+        # Free to compute from the device list we already fetched -- this is
+        # what lets the panel show a device picker without a separate request.
+        device_list = [{"id": d.device_id, "name": d.name} for d in devices]
+        if config.get("devices") != device_list:
+            config["devices"] = device_list
+            common.save_config(config)
+
+        device = next((d for d in devices if d.device_id == device_id), None)
+        if device is None:
+            common.emit_error(
+                "device_not_found", "The configured device is no longer on this MELCloud account",
+                devices=device_list,
+            )
+            return
+
+        try:
+            await device.update()
+
+            if args.command == "set":
+                properties = {}
+                if args.power is not None:
+                    properties["power"] = args.power == "on"
+                if args.mode is not None:
+                    properties["operation_mode"] = args.mode
+                if args.target is not None:
+                    properties["target_temperature"] = args.target
+                if args.fan is not None:
+                    properties["fan_speed"] = args.fan
+                if args.vane_h is not None:
+                    properties["vane_horizontal"] = args.vane_h
+                if args.vane_v is not None:
+                    properties["vane_vertical"] = args.vane_v
+                if properties:
+                    await device.set(properties)
+        except aiohttp.ClientError as exc:
+            common.emit_error("network_error", str(exc))
+            return
+        except ValueError as exc:
+            common.emit_error("invalid_value", str(exc))
+            return
+
+        common.emit({"ok": True, "device": common.device_to_json(device), "devices": device_list})
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    select_parser = sub.add_parser("select")
+    select_parser.add_argument("--device-id", dest="device_id", type=int, required=True)
+    set_parser = sub.add_parser("set")
+    set_parser.add_argument("--power", choices=["on", "off"])
+    set_parser.add_argument("--mode", choices=["heat", "dry", "cool", "fan_only", "heat_cool"])
+    set_parser.add_argument("--target", type=float)
+    set_parser.add_argument("--fan")
+    set_parser.add_argument("--vane-h", dest="vane_h",
+                             choices=["auto", "1_left", "2", "3", "4", "5_right", "split", "swing"])
+    set_parser.add_argument("--vane-v", dest="vane_v",
+                             choices=["auto", "1_up", "2", "3", "4", "5_down", "swing"])
+    args = parser.parse_args()
+    asyncio.run(_run(args))
+
+
+if __name__ == "__main__":
+    main()

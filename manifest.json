@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gskrt.melcloud",
+  "name": "OmaMELCloud",
+  "version": "1.0.0",
+  "author": "Gregor Skrt",
+  "license": "MIT",
+  "description": "Control a Mitsubishi Electric MELCloud air conditioner from the Omarchy bar: power, mode, and target temperature for one room.",
+  "homepage": "https://github.com/GSkrt/omarchy-melcloud",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaMELCloud",
+    "description": "Shows room and target temperature and power state for one MELCloud air conditioner, with power, mode, and target-temperature controls in the panel.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often to poll MELCloud for the device's state. MELCloud asks integrations not to poll device state more than about once a minute, so this is floored at 60.",
+        "min": 60,
+        "max": 600,
+        "step": 10,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

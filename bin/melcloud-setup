@@ -1,0 +1,101 @@
+#!/usr/bin/python3 -I
+"""Interactive MELCloud sign-in, run in a floating terminal from the bar panel.
+
+Prompts for a MELCloud email and password, verifies them against
+https://app.melcloud.com, stores the password in the login keyring (via
+secret-tool -- see _melcloud_common.py) and the email plus the chosen
+device id in ~/.config/omarchy-melcloud/config.json, and asks which device to
+control when the account has more than one air conditioner.
+
+melcloud-ctl (the panel's own backend) never prompts for anything; this
+script is the only place credentials are entered or changed.
+"""
+import asyncio
+import getpass
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # see melcloud-ctl for why
+import _melcloud_common as common  # noqa: E402
+
+
+async def _run():
+    print("MELCloud sign-in")
+    print("=================")
+    print("Credentials are used only to talk to https://app.melcloud.com.")
+    print("The password is stored in your login keyring, not in a plain file.\n")
+
+    config = common.load_config()
+    default_email = config.get("email", "")
+    email_prompt = "Email [%s]: " % default_email if default_email else "Email: "
+    email = input(email_prompt).strip() or default_email
+    if not email:
+        print("An email address is required.")
+        return 1
+
+    password = getpass.getpass("Password: ")
+    if not password:
+        print("A password is required.")
+        return 1
+
+    import aiohttp
+
+    print("\nSigning in to MELCloud...")
+    async with aiohttp.ClientSession() as session:
+        try:
+            token = await common.obtain_token(session, email, password)
+        except aiohttp.ClientError as exc:
+            print("Could not reach MELCloud: %s" % exc)
+            return 1
+        except (AttributeError, KeyError, TypeError):
+            print("MELCloud rejected that email/password.")
+            return 1
+
+        common.set_password(email, password)
+
+        try:
+            devices = await common.fetch_devices(session, token)
+        except aiohttp.ClientError as exc:
+            print("Signed in, but could not list devices: %s" % exc)
+            return 1
+
+    if not devices:
+        print("Signed in, but this MELCloud account has no air conditioners (ATA devices).")
+        return 1
+
+    if len(devices) == 1:
+        chosen = devices[0]
+    else:
+        print("\n%d air conditioners found -- pick which one to start with" % len(devices))
+        print("(you can switch between all of them later from the panel itself):")
+        for i, device in enumerate(devices, start=1):
+            print("  %d. %s" % (i, device.name))
+        chosen = None
+        while chosen is None:
+            choice = input("Pick one [1-%d]: " % len(devices)).strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(devices):
+                chosen = devices[int(choice) - 1]
+            else:
+                print("Enter a number between 1 and %d." % len(devices))
+
+    device_list = [{"id": d.device_id, "name": d.name} for d in devices]
+    common.save_config({"email": email, "deviceId": chosen.device_id, "devices": device_list})
+    print("\nSaved. Controlling \"%s\" from the bar now." % chosen.name)
+    return 0
+
+
+def main():
+    try:
+        code = asyncio.run(_run())
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.")
+        code = 1
+    try:
+        input("\nPress Enter to close...")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()
